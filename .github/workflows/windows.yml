@@ -1,0 +1,28 @@
+name: Windows desktop build
+on:
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: Build channel
+        required: true
+        default: test
+        type: choice
+        options:
+          - test
+          - release
+jobs:
+  build:
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: ./build-windows.ps1 -Channel '${{ inputs.channel }}'
+        shell: pwsh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ARW-to-PNG-Windows-${{ inputs.channel }}
+          path: dist/ARW-to-PNG/
