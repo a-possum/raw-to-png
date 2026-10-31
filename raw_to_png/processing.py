@@ -11,6 +11,8 @@ import time
 
 import psutil
 
+from .i18n import exception_text, message
+
 MIB = 1024 ** 2
 GIB = 1024 ** 3
 BOOTSTRAP_BYTES = 256 * MIB
@@ -69,7 +71,7 @@ def resources():
 
 def worker_limit(mode, snapshot, successes, speed_target=1):
     if mode not in MODES:
-        raise ValueError('Неизвестный режим производительности')
+        raise ValueError(message('Неизвестный режим производительности'))
     if mode == 'eco':
         return 1
     if mode == 'maximum':
@@ -137,7 +139,7 @@ def admits(snapshot, estimate, current_rss=0, headroom=0):
 
 def lower_priority(mode='auto'):
     if mode not in MODES:
-        raise ValueError('Неизвестный режим производительности')
+        raise ValueError(message('Неизвестный режим производительности'))
     process = psutil.Process()
     if sys.platform == 'win32':
         process.nice(psutil.NORMAL_PRIORITY_CLASS if mode == 'maximum'
@@ -197,7 +199,7 @@ def _child(source, target, bits, options, connection, cancel, mode='auto'):
     except Exception as error:
         # Import failure is also a job failure and must not strand the queue.
         result = {'state': 'Отменено' if isinstance(error, cancelled_type) else 'Ошибка',
-                  'detail': '' if isinstance(error, cancelled_type) else str(error),
+                  'detail': '' if isinstance(error, cancelled_type) else exception_text(error),
                   'memory_error': isinstance(error, MemoryError),
                   'error_kind': type(error).__name__, 'error_code': getattr(error, 'errno', None)}
     try:
@@ -268,7 +270,7 @@ def run_queue(jobs, bits, options, mode, cancel, on_row, on_progress,
               on_activity=lambda text: None, *, snapshot=resources, _target=None, diagnostics=None):
     """Launch one metadata probe at a time; admit decoding against live RAM."""
     if mode not in MODES:
-        raise ValueError('Неизвестный режим производительности')
+        raise ValueError(message('Неизвестный режим производительности'))
     context = mp.get_context('spawn')
     shared_cancel = context.Event()
     active = []
@@ -316,7 +318,7 @@ def run_queue(jobs, bits, options, mode, cancel, on_row, on_progress,
                         job.result = payload
                 result = job.result or {'state': 'Ошибка', 'error_kind': 'WorkerExit',
                                         'exit_code': job.process.exitcode,
-                                        'detail': f'Рабочий процесс завершился (код {job.process.exitcode})'}
+                                        'detail': message('Рабочий процесс завершился (код {code})', code=job.process.exitcode)}
                 cpu_seconds = result.get('cpu_seconds')
                 if result['state'] == 'Готово':
                     if cancel.is_set():
@@ -326,7 +328,7 @@ def run_queue(jobs, bits, options, mode, cancel, on_row, on_progress,
                             publish(Path(job.staging.name) / 'image.png', job.target)
                             result['detail'] = str(job.target)
                         except OSError as error:
-                            result = {'state': 'Ошибка', 'detail': str(error),
+                            result = {'state': 'Ошибка', 'detail': exception_text(error),
                                       'error_kind': type(error).__name__, 'error_code': error.errno}
                 job.peak = max(job.peak, result.get('peak_bytes', 0))
                 peak_worker = max(peak_worker, job.peak)
@@ -360,7 +362,7 @@ def run_queue(jobs, bits, options, mode, cancel, on_row, on_progress,
                 active.remove(job)
 
             if cancel.is_set():
-                activity(f'{label} · остановка, активных задач: {len(active)}')
+                activity(message('{mode} · остановка, активных задач: {count}', mode=message(label), count=len(active)))
                 if active:
                     time.sleep(0.1)
                 continue
@@ -376,7 +378,7 @@ def run_queue(jobs, bits, options, mode, cancel, on_row, on_progress,
                                for other in active if other is not job and other.admitted)
                 try:
                     if job.estimate + state.reserve > state.total:
-                        job.pipe.send('Для этого RAW недостаточно оперативной памяти с учётом запаса системе')
+                        job.pipe.send(message('Для этого RAW недостаточно оперативной памяти с учётом запаса системе'))
                         job.decided = True
                     elif admits(state, job.estimate, job.rss, headroom):
                         job.pipe.send('run')
@@ -390,10 +392,10 @@ def run_queue(jobs, bits, options, mode, cancel, on_row, on_progress,
                 except (OSError, EOFError) as error:
                     job.decided = True
                     job.result = {'state': 'Ошибка', 'error_kind': type(error).__name__,
-                                  'detail': f'Потеряна связь с рабочим процессом: {error}'}
+                                  'detail': message('Потеряна связь с рабочим процессом: {error}', error=exception_text(error))}
 
             while cursor < len(jobs) and jobs[cursor][1] is None:
-                on_row(cursor, 'Пропущено', 'PNG с таким именем уже существует или есть в очереди')
+                on_row(cursor, 'Пропущено', message('PNG с таким именем уже существует или есть в очереди'))
                 if diagnostics:
                     diagnostics.job_finished(index=cursor, state='Пропущено')
                 cursor += 1
@@ -403,7 +405,7 @@ def run_queue(jobs, bits, options, mode, cancel, on_row, on_progress,
                     and not any(not job.decided for job in active)):
                 headroom = sum(max(0, job.estimate - job.rss) for job in active if job.admitted)
                 if BOOTSTRAP_BYTES + state.reserve > state.total:
-                    on_row(cursor, 'Ошибка', 'Недостаточно памяти для безопасного запуска обработки')
+                    on_row(cursor, 'Ошибка', message('Недостаточно памяти для безопасного запуска обработки'))
                     if diagnostics:
                         diagnostics.job_finished(index=cursor, state='Ошибка', error_kind='MemoryBudget')
                     cursor += 1
@@ -415,7 +417,7 @@ def run_queue(jobs, bits, options, mode, cancel, on_row, on_progress,
                         target.parent.mkdir(parents=True, exist_ok=True)
                         staging = tempfile.TemporaryDirectory(prefix='.arw-to-png-', dir=target.parent)
                     except OSError as error:
-                        on_row(cursor, 'Ошибка', str(error))
+                        on_row(cursor, 'Ошибка', exception_text(error))
                         if diagnostics:
                             diagnostics.job_finished(index=cursor, state='Ошибка',
                                                      error_kind=type(error).__name__, error_code=error.errno)
@@ -446,8 +448,9 @@ def run_queue(jobs, bits, options, mode, cancel, on_row, on_progress,
             max_active = max(max_active, count)
             if diagnostics:
                 diagnostics.observe(count, limit, state, waiting)
-            activity(f'{label} · обрабатывается фотографий: {count}' if not waiting else
-                     f'{label} · ожидание свободной памяти, активных задач: {count}')
+            activity(message('{mode} · обрабатывается фотографий: {count}' if not waiting else
+                             '{mode} · ожидание свободной памяти, активных задач: {count}',
+                             mode=message(label), count=count))
             cancel.wait(0.1)
     finally:
         # Cooperative shutdown: never terminate a process in the middle of writing.

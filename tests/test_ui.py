@@ -55,7 +55,8 @@ def test_presets_and_custom_controls(app, tmp_path):
 
 
 @pytest.mark.parametrize('mode', ['eco', 'maximum'])
-def test_choose_destination_and_background_conversion_options(app, tmp_path, monkeypatch, mode):
+@pytest.mark.parametrize('language', ['ru', 'en'])
+def test_choose_destination_and_background_conversion_options(app, tmp_path, monkeypatch, mode, language):
     from pathlib import Path
     from PySide6.QtCore import QEventLoop, QTimer
     destination = tmp_path / 'chosen-output'
@@ -72,6 +73,7 @@ def test_choose_destination_and_background_conversion_options(app, tmp_path, mon
                 'cancelled':False, 'elapsed':.1, 'max_active':1}
     monkeypatch.setattr('raw_to_png.ui.run_queue', fake_queue)
     window = Window()
+    window.language.setCurrentIndex(window.language.findData(language))
     window.pick_destination()
     assert window.destination.text() == str(destination)
     window.preset.setCurrentIndex(window.preset.findData('quick'))
@@ -79,6 +81,7 @@ def test_choose_destination_and_background_conversion_options(app, tmp_path, mon
     window.performance.setCurrentIndex(window.performance.findData(mode))
     window.imported([Source(tmp_path / 'photo.ARW', Path('sub/photo.ARW'))])
     window.begin()
+    assert not window.language.isEnabled()
     loop = QEventLoop()
     window.worker.finished.connect(loop.quit)
     QTimer.singleShot(5000, loop.quit)
@@ -88,10 +91,13 @@ def test_choose_destination_and_background_conversion_options(app, tmp_path, mon
     assert calls[0][0] == destination / 'photo.png'
     assert calls[0][1] == 8 and calls[0][3] == mode
     assert calls[0][2].half_size and calls[0][2].auto_bright
-    assert window.table.item(0, 1).text() == 'Готово'
+    assert window.table.item(0, 1).text() == ('Готово' if language == 'ru' else 'Done')
+    assert ('ошибок: 0' if language == 'ru' else 'errors: 0') in window.status.text()
+    assert window.language.isEnabled()
     assert window.start.isEnabled()
     window.close()
     restored = Window()
+    assert restored.language.currentData() == language
     assert restored.destination.text() == str(destination)
     assert restored.preset.currentData() == 'quick'
     assert restored.half_size.isChecked()

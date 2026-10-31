@@ -3,19 +3,20 @@ import sys
 from threading import Event
 import tempfile
 
-from PySide6.QtCore import QSettings, QThread, QUrl, Signal, Qt, QStandardPaths
+from PySide6.QtCore import QSettings, QThread, QUrl, Signal, Qt, QStandardPaths, QSignalBlocker
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QFileDialog, QHBoxLayout, QHeaderView,
     QLabel, QLineEdit, QMainWindow, QMessageBox, QProgressBar, QPushButton,
     QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget, QAbstractItemView,
     QGroupBox, QFormLayout, QDoubleSpinBox, QStackedWidget,
-    QScrollArea, QFrame, QLayout, QSizePolicy,
+    QScrollArea, QFrame, QLayout, QSizePolicy, QAbstractButton,
 )
 
 from .converter import ConversionOptions, discover, plan
 from .processing import run_queue
 from .diagnostics import DiagnosticReport, build_channel, write_report
+from .i18n import Message, exception_text, language_code, message, render
 
 
 def default_diagnostics_directory():
@@ -23,10 +24,10 @@ def default_diagnostics_directory():
 
 
 class Worker(QThread):
-    row = Signal(int, str, str)
+    row = Signal(int, str, object)
     progress = Signal(int)
-    summary = Signal(str)
-    activity = Signal(str)
+    summary = Signal(object)
+    activity = Signal(object)
 
     def __init__(self, jobs, bits, options=None, mode='auto', *, diagnostics_enabled=False,
                  diagnostics_dir=None, channel='release'):
@@ -56,8 +57,8 @@ class Worker(QThread):
                                     self.row.emit, self.progress.emit, self.activity.emit, **kwargs)
         except Exception as error:
             fatal_kind = type(error).__name__
-            self.summary.emit(f'Не удалось продолжить очередь: {error}')
-            self.activity.emit('Обработка остановлена')
+            self.summary.emit(message('Не удалось продолжить очередь: {error}', error=exception_text(error)))
+            self.activity.emit(message('Обработка остановлена'))
             return
         finally:
             if report:
@@ -68,15 +69,16 @@ class Worker(QThread):
                     self.report_error = type(error).__name__
         result = self.result
         state = 'Остановлено' if result['cancelled'] else 'Завершено'
-        self.summary.emit(f"{state}. Готово: {result['ok']}, ошибок: {result['failed']}, "
-                          f"пропущено: {result['skipped']}, не обработано: {result['remaining']}. "
-                          f"Время: {result['elapsed']:.0f} с.")
-        self.activity.emit(f"{state} · одновременно обрабатывалось до {result['max_active']} фотографий")
+        self.summary.emit(message('{state}. Готово: {ok}, ошибок: {failed}, пропущено: {skipped}, '
+                                  'не обработано: {remaining}. Время: {elapsed:.0f} с.',
+                                  state=message(state), **result))
+        self.activity.emit(message('{state} · одновременно обрабатывалось до {count} фотографий',
+                                   state=message(state), count=result['max_active']))
 
 
 class Scanner(QThread):
     found = Signal(object)
-    error = Signal(str)
+    error = Signal(object)
 
     def __init__(self, paths, recursive):
         super().__init__()
@@ -86,7 +88,7 @@ class Scanner(QThread):
         try:
             self.found.emit(discover(self.paths, self.recursive))
         except Exception as error:
-            self.error.emit(str(error))
+            self.error.emit(exception_text(error))
 
 
 class Window(QMainWindow):
@@ -99,6 +101,9 @@ class Window(QMainWindow):
         self.sources = []
         self.worker = self.scanner = None
         self.settings = QSettings('RawToPng', 'RawToPng')
+        self.language_code = language_code(self.settings.value('language', 'ru'))
+        self._texts = {}
+        self._attributes = []
         self.channel = build_channel()
         self.last_report = None
         if self.channel == 'test':
@@ -120,9 +125,17 @@ class Window(QMainWindow):
         heading.addWidget(subtitle)
         header.addLayout(heading)
         header.addStretch()
-        badge = QLabel('SONY ARW  →  PNG')
+        badge = QLabel('ARW  →  PNG')
         badge.setObjectName('badge')
         header.addWidget(badge)
+        self.language_label = QLabel('Язык')
+        header.addWidget(self.language_label)
+        self.language = QComboBox()
+        self.language.addItem('Русский', 'ru')
+        self.language.addItem('English', 'en')
+        self.language.setCurrentIndex(self.language.findData(self.language_code))
+        self.language_label.setBuddy(self.language)
+        header.addWidget(self.language)
         layout.addLayout(header)
         body = QHBoxLayout()
         body.setSpacing(18)
@@ -276,7 +289,7 @@ class Window(QMainWindow):
         self.progress = QProgressBar()
         self.progress.setRange(0, 1)
         self.progress.setValue(0)
-        self.progress.setFormat('%v из %m файлов · %p%')
+        self.set_progress_format('%v из %m файлов · %p%')
         layout.addWidget(self.progress)
         self.diagnostics_status = QLabel('Отчёт проверки будет сохранён только на этом компьютере.')
         self.diagnostics_status.setObjectName('muted')
@@ -346,6 +359,69 @@ class Window(QMainWindow):
         ''')
         self.fit_options_height()
 
+        self.remember_strings()
+        self.retranslate()
+        self.language.currentIndexChanged.connect(self.change_language)
+
+    def set_text(self, widget, value):
+        value = value if isinstance(value, Message) else message(value)
+        self._texts[widget] = value
+        widget.setText(render(value, self.language_code))
+
+    def set_progress_format(self, source):
+        self._progress_format = message(source)
+        self.progress.setFormat(render(self._progress_format, self.language_code))
+
+    def remember_strings(self):
+        # Capture static designer text once. Runtime updates replace its message,
+        # so switching language also preserves completed summaries and queue state.
+        for kind in (QLabel, QAbstractButton):
+            for widget in self.findChildren(kind):
+                self._texts.setdefault(widget, message(widget.text()))
+        for widget in self.findChildren(QWidget):
+            if widget.toolTip():
+                self._attributes.append((widget.setToolTip, message(widget.toolTip())))
+        for group in self.findChildren(QGroupBox):
+            self._attributes.append((group.setTitle, message(group.title())))
+        self._attributes.append((self.destination.setPlaceholderText,
+                                 message(self.destination.placeholderText())))
+        for combo in (self.preset, self.performance, self.bits, self.white_balance, self.collision):
+            for index in range(combo.count()):
+                combo.setItemData(index, message(combo.itemText(index)), Qt.UserRole + 1)
+
+    def retranslate(self):
+        self.language.setAccessibleName(self.text('Язык'))
+        self.setWindowTitle(self.text('ARW → PNG · Конвертер фотографий') +
+                            (self.text(' · тестовая сборка') if self.channel == 'test' else ''))
+        for widget, value in self._texts.items():
+            widget.setText(render(value, self.language_code))
+        for setter, value in self._attributes:
+            setter(render(value, self.language_code))
+        for combo in (self.preset, self.performance, self.bits, self.white_balance, self.collision):
+            with QSignalBlocker(combo):
+                for index in range(combo.count()):
+                    # QVariant converts str subclasses to plain strings here.
+                    source = combo.itemData(index, Qt.UserRole + 1)
+                    combo.setItemText(index, self.text(source))
+        self.table.setHorizontalHeaderLabels([self.text(value) for value in
+                                             ('Фотография', 'Статус', 'Результат / ошибка')])
+        for row in range(self.table.rowCount()):
+            for column in (1, 2):
+                item = self.table.item(row, column)
+                value = render(item.source_text, self.language_code)
+                item.setText(value)
+                item.setToolTip(value)
+        self.progress.setFormat(render(self._progress_format, self.language_code))
+        self.fit_options_height()
+
+    def text(self, source, **values):
+        return render(message(source, **values), self.language_code)
+
+    def change_language(self):
+        self.language_code = language_code(self.language.currentData())
+        self.settings.setValue('language', self.language_code)
+        self.retranslate()
+
     def fit_options_height(self):
         # Scroll the sidebar instead of squeezing wrapped labels into each other.
         margins = self.options_group.layout().contentsMargins()
@@ -358,24 +434,24 @@ class Window(QMainWindow):
             self.options_group.setMinimumHeight(height)
 
     def set_activity(self, text):
-        self.activity_label.setText(text)
+        self.set_text(self.activity_label, text)
         self.fit_options_height()
 
     def performance_changed(self):
         self.maximum_notice.setVisible(self.performance.currentData() == 'maximum')
         label = {'auto': 'Авто', 'eco': 'Экономный', 'maximum': 'Максимальная скорость'}
-        self.set_activity(f'{label[self.performance.currentData()]} · ожидание запуска')
+        self.set_activity(message('{mode} · ожидание запуска', mode=message(label[self.performance.currentData()])))
 
     def refresh_actions(self):
         busy = self.busy()
         self.start.setEnabled(bool(self.sources) and not busy)
         self.remove.setEnabled(bool(self.table.selectedItems()) and not busy)
         self.open_output.setEnabled(bool(self.destination.text().strip()) and Path(self.destination.text().strip()).expanduser().is_dir())
-        self.start.setText(f'Конвертировать {len(self.sources)} файлов' if self.sources else 'Конвертировать')
-        self.count.setText(f'В очереди: {len(self.sources)} · оригиналы не изменяются' if self.sources else 'Очередь пуста · оригиналы остаются без изменений')
+        self.set_text(self.start, message('Конвертировать {count} файлов', count=len(self.sources)) if self.sources else 'Конвертировать')
+        self.set_text(self.count, message('В очереди: {count} · оригиналы не изменяются', count=len(self.sources)) if self.sources else 'Очередь пуста · оригиналы остаются без изменений')
         self.stack.setCurrentIndex(1 if self.sources else 0)
         if not self.sources:
-            self.progress.setFormat('Ожидание файлов')
+            self.set_progress_format('Ожидание файлов')
 
     def apply_preset(self):
         mode = self.preset.currentData()
@@ -385,7 +461,7 @@ class Window(QMainWindow):
             'quick': 'Половина ширины и высоты, 8 бит — быстрее и меньше места на диске.',
             'custom': 'Выбраны ваши настройки. Результат сохраняется в PNG / sRGB.',
         }
-        self.preset_help.setText(help_text[mode])
+        self.set_text(self.preset_help, help_text[mode])
         self.fit_options_height()
         if mode == 'custom':
             self.advanced_toggle.setChecked(True)
@@ -419,7 +495,7 @@ class Window(QMainWindow):
             del self.sources[row]
             self.table.removeRow(row)
         self.refresh_actions()
-        self.status.setText(f'В очереди: {len(self.sources)} файлов')
+        self.set_text(self.status, message('В очереди: {count} файлов', count=len(self.sources)))
 
     def busy(self):
         return any(worker is not None and worker.isRunning() for worker in (self.worker, self.scanner))
@@ -427,22 +503,23 @@ class Window(QMainWindow):
     def lock(self, busy):
         for control in (self.add_files, self.add_folder, self.clear, self.recursive,
                         self.destination, self.browse, self.bits, self.start, self.remove,
-                        self.preserve, self.collision, self.preset, self.advanced, self.performance):
+                        self.preserve, self.collision, self.preset, self.advanced, self.performance, self.language):
             control.setEnabled(not busy)
         if not busy:
             self.refresh_actions()
 
     def pick_files(self):
-        paths, _ = QFileDialog.getOpenFileNames(self, 'Выберите Sony RAW', '', 'Sony RAW (*.arw *.ARW)')
+        paths, _ = QFileDialog.getOpenFileNames(self, self.text('Выберите файлы ARW'), '',
+                                                self.text('Файлы ARW (*.arw *.ARW)'))
         self.add(paths)
 
     def pick_folder(self):
-        path = QFileDialog.getExistingDirectory(self, 'Добавить папку с ARW')
+        path = QFileDialog.getExistingDirectory(self, self.text('Добавить папку с ARW'))
         if path:
             self.add([path])
 
     def pick_destination(self):
-        path = QFileDialog.getExistingDirectory(self, 'Папка для PNG', self.destination.text())
+        path = QFileDialog.getExistingDirectory(self, self.text('Папка для PNG'), self.destination.text())
         if path:
             self.destination.setText(path)
 
@@ -450,10 +527,10 @@ class Window(QMainWindow):
         if not paths or self.busy():
             return
         self.lock(True)
-        self.status.setText('Поиск ARW…')
+        self.set_text(self.status, 'Поиск ARW…')
         self.scanner = Scanner(paths, self.recursive.isChecked())
         self.scanner.found.connect(self.imported)
-        self.scanner.error.connect(lambda error: self.status.setText(f'Ошибка чтения папки: {error}'))
+        self.scanner.error.connect(lambda error: self.set_text(self.status, message('Ошибка чтения папки: {error}', error=error)))
         self.scanner.finished.connect(lambda: self.lock(False))
         self.scanner.start()
 
@@ -467,25 +544,28 @@ class Window(QMainWindow):
                 self.table.insertRow(row)
                 for column, value in enumerate((str(source.relative), 'В очереди', '')):
                     item = QTableWidgetItem(value)
-                    item.setToolTip(value)
+                    if column in (1, 2):
+                        item.source_text = message(value) if column == 1 else value
+                        item.setText(render(item.source_text, self.language_code))
+                    item.setToolTip(item.text())
                     self.table.setItem(row, column, item)
                 self.table.item(row, 0).setToolTip(str(source.path))
         self.progress.setRange(0, max(1, len(self.sources)))
         self.progress.setValue(0)
-        self.progress.setFormat('%v из %m файлов · %p%')
-        self.status.setText(f'В очереди: {len(self.sources)} файлов')
+        self.set_progress_format('%v из %m файлов · %p%')
+        self.set_text(self.status, message('В очереди: {count} файлов', count=len(self.sources)))
         self.refresh_actions()
 
     def clear_queue(self):
         self.sources.clear()
         self.table.setRowCount(0)
         self.progress.setValue(0)
-        self.status.setText('Очередь очищена')
+        self.set_text(self.status, 'Очередь очищена')
         self.refresh_actions()
 
     def begin(self):
         if not self.sources:
-            QMessageBox.information(self, 'Очередь пуста', 'Добавьте файлы .ARW или папку.')
+            QMessageBox.information(self, self.text('Очередь пуста'), self.text('Добавьте файлы .ARW или папку.'))
             return
         if not self.destination.text().strip():
             self.pick_destination()
@@ -499,7 +579,8 @@ class Window(QMainWindow):
             jobs = plan(self.sources, destination, preserve_folders=self.preserve.isChecked(),
                         collision=self.collision.currentData())
         except Exception as error:
-            QMessageBox.warning(self, 'Папка назначения недоступна', str(error))
+            QMessageBox.warning(self, self.text('Папка назначения недоступна'),
+                                render(exception_text(error), self.language_code))
             return
         self.settings.setValue('destination', str(destination))
         self.settings.setValue('bits', self.bits.currentData())
@@ -512,15 +593,15 @@ class Window(QMainWindow):
         }.items():
             self.settings.setValue(key, value)
         for index, (_, target) in enumerate(jobs):
-            self.update_row(index, 'В очереди', str(target) if target else 'Будет пропущено: совпадение имени')
+            self.update_row(index, 'В очереди', str(target) if target else message('Будет пропущено: совпадение имени'))
         self.progress.setRange(0, len(jobs))
         self.progress.setValue(0)
         self.lock(True)
         self.stop.setEnabled(True)
-        self.status.setText('Конвертация…')
+        self.set_text(self.status, 'Конвертация…')
         self.last_report = None
         self.save_report.setEnabled(False)
-        self.diagnostics_status.setText('Отчёт проверки записывается только на этом компьютере.')
+        self.set_text(self.diagnostics_status, 'Отчёт проверки записывается только на этом компьютере.')
         options = ConversionOptions(white_balance=self.white_balance.currentData(),
                                     auto_bright=self.auto_bright.isChecked(),
                                     half_size=self.half_size.isChecked(),
@@ -530,16 +611,18 @@ class Window(QMainWindow):
                              diagnostics_dir=default_diagnostics_directory(), channel=self.channel)
         self.worker.row.connect(self.update_row)
         self.worker.progress.connect(self.progress.setValue)
-        self.worker.summary.connect(self.status.setText)
+        self.worker.summary.connect(lambda value: self.set_text(self.status, value))
         self.worker.activity.connect(self.set_activity)
         self.worker.finished.connect(self.finished)
         self.worker.start()
         self.open_output.setEnabled(True)
 
     def update_row(self, index, state, detail):
-        for column, text in ((1, state), (2, detail)):
-            self.table.item(index, column).setText(text)
-            self.table.item(index, column).setToolTip(text)
+        for column, value in ((1, message(state)), (2, detail)):
+            item = self.table.item(index, column)
+            item.source_text = value
+            item.setText(render(value, self.language_code))
+            item.setToolTip(item.text())
 
     def finished(self):
         self.lock(False)
@@ -548,32 +631,33 @@ class Window(QMainWindow):
             self.last_report = self.worker.report_data
             self.save_report.setEnabled(self.last_report is not None)
             if self.worker.report_error:
-                self.diagnostics_status.setText('Не удалось автоматически сохранить отчёт. '
+                self.set_text(self.diagnostics_status, 'Не удалось автоматически сохранить отчёт. '
                                                 'Попробуйте кнопку «Сохранить отчёт».'
                                                 if self.last_report is not None else
                                                 'Не удалось создать отчёт проверки.')
             elif self.last_report is not None:
-                self.diagnostics_status.setText('Отчёт проверки готов. Его можно сохранить и передать для проверки.')
+                self.set_text(self.diagnostics_status, 'Отчёт проверки готов. Его можно сохранить и передать для проверки.')
         for row in range(self.table.rowCount()):
-            if self.table.item(row, 1).text() in ('В очереди', 'Подготовка…', 'Обработка…'):
-                self.update_row(row, 'Не обработано', self.table.item(row, 2).text())
+            if self.table.item(row, 1).source_text in ('В очереди', 'Подготовка…', 'Обработка…'):
+                self.update_row(row, 'Не обработано', self.table.item(row, 2).source_text)
 
     def cancel(self):
         if self.worker:
             self.worker.cancel.set()
             self.stop.setEnabled(False)
-            self.status.setText('Остановка… Дождитесь завершения текущего этапа обработки RAW.')
+            self.set_text(self.status, 'Остановка… Дождитесь завершения текущего этапа обработки RAW.')
 
     def export_report(self):
         if self.last_report is None:
             return
-        path, _ = QFileDialog.getSaveFileName(self, 'Сохранить отчёт проверки',
-                                             'ARW-to-PNG-report.json', 'Отчёт JSON (*.json)')
+        path, _ = QFileDialog.getSaveFileName(self, self.text('Сохранить отчёт проверки'),
+                                             'ARW-to-PNG-report.json', self.text('Отчёт JSON (*.json)'))
         if path:
             try:
                 write_report(Path(path), self.last_report)
             except OSError:
-                QMessageBox.warning(self, 'Не удалось сохранить отчёт', 'Выберите другую папку для отчёта.')
+                QMessageBox.warning(self, self.text('Не удалось сохранить отчёт'),
+                                    self.text('Выберите другую папку для отчёта.'))
 
     def open_folder(self):
         path = Path(self.destination.text().strip()).expanduser()
@@ -591,8 +675,8 @@ class Window(QMainWindow):
         if self.busy():
             self.cancel()
             event.ignore()
-            QMessageBox.information(self, 'Дождитесь остановки',
-                                    'Идёт обработка. Дождитесь её остановки и закройте окно ещё раз.')
+            QMessageBox.information(self, self.text('Дождитесь остановки'),
+                                    self.text('Идёт обработка. Дождитесь её остановки и закройте окно ещё раз.'))
         else:
             event.accept()
 

@@ -1,1 +1,1 @@
-"""Bulk Sony ARW to PNG desktop converter."""
+"""Bulk ARW to PNG desktop converter."""

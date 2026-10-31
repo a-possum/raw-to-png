@@ -10,6 +10,8 @@ import numpy as np
 import png
 import rawpy
 
+from .i18n import message
+
 
 class Cancelled(Exception):
     pass
@@ -30,9 +32,9 @@ class ConversionOptions:
 
     def __post_init__(self):
         if self.white_balance not in ('camera', 'auto', 'daylight'):
-            raise ValueError('Неизвестный баланс белого')
+            raise ValueError(message('Неизвестный баланс белого'))
         if not -2 <= self.brightness_ev <= 2:
-            raise ValueError('Яркость должна быть от −2 до +2 EV')
+            raise ValueError(message('Яркость должна быть от −2 до +2 EV'))
 
 
 def discover(paths, recursive=True):
@@ -70,11 +72,11 @@ def plan(sources, destination, *, preserve_folders=True, collision='rename'):
     scanned = set()
     result = []
     if collision not in ('rename', 'skip'):
-        raise ValueError('Неизвестный режим совпадения имён')
+        raise ValueError(message('Неизвестный режим совпадения имён'))
     for source in sources:
         relative = source.relative.with_suffix('.png')
         if relative.is_absolute() or '..' in relative.parts:
-            raise ValueError('Недопустимый путь назначения')
+            raise ValueError(message('Недопустимый путь назначения'))
         if not preserve_folders:
             relative = Path(relative.name)
         target = Path(destination) / relative
@@ -104,7 +106,7 @@ class SRGBWriter(png.Writer):
 def write_png(rgb, target, cancel):
     """Encode to a temporary file, then publish without overwriting any file."""
     if rgb.dtype not in (np.uint8, np.uint16) or rgb.ndim != 3 or rgb.shape[2] != 3:
-        raise ValueError('Ожидается RGB-массив uint8 или uint16')
+        raise ValueError(message('Ожидается RGB-массив uint8 или uint16'))
     if cancel.is_set():
         raise Cancelled()
     target = Path(target)
@@ -141,7 +143,7 @@ def write_png(rgb, target, cancel):
 
 def convert(source, target, bits=16, cancel=None, options=None):
     if bits not in (8, 16):
-        raise ValueError('Поддерживаются 8 и 16 бит')
+        raise ValueError(message('Поддерживаются 8 и 16 бит'))
     cancel = cancel if cancel is not None else Event()
     options = options if options is not None else ConversionOptions()
     if cancel.is_set():
