@@ -14,7 +14,7 @@ def test_window_and_worker_continue_after_bad_raw(app, tmp_path):
     source.write_bytes(b'invalid')
     window.imported([Source(source, Path(source.name))])
     assert window.table.rowCount() == 1
-    assert window.bits.itemData(0) == 16
+    assert window.bits.itemData(0) == 8
     outcomes, completed = [], []
     worker = Worker([(Source(source, Path(source.name)), tmp_path / 'out.png'),
                      (Source(source, Path(source.name)), tmp_path / 'second.png'),
@@ -32,11 +32,11 @@ def test_window_and_worker_continue_after_bad_raw(app, tmp_path):
 def test_presets_and_custom_controls(app, tmp_path):
     from pathlib import Path
     window = Window()
-    assert window.bits.currentData() == 16
+    assert window.bits.currentData() == 8
     assert not window.start.isEnabled()
     window.preset.setCurrentIndex(window.preset.findData('viewing'))
     assert window.bits.currentData() == 8
-    assert window.auto_bright.isChecked()
+    assert not window.auto_bright.isChecked()
     assert not window.half_size.isChecked()
     window.preset.setCurrentIndex(window.preset.findData('quick'))
     assert window.half_size.isChecked()
@@ -90,7 +90,7 @@ def test_choose_destination_and_background_conversion_options(app, tmp_path, mon
     assert not window.worker.isRunning()
     assert calls[0][0] == destination / 'photo.png'
     assert calls[0][1] == 8 and calls[0][3] == mode
-    assert calls[0][2].half_size and calls[0][2].auto_bright
+    assert calls[0][2].half_size and not calls[0][2].auto_bright
     assert window.table.item(0, 1).text() == ('Готово' if language == 'ru' else 'Done')
     assert ('ошибок: 0' if language == 'ru' else 'errors: 0') in window.status.text()
     assert window.language.isEnabled()

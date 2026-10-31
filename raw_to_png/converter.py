@@ -141,7 +141,7 @@ def write_png(rgb, target, cancel):
             temporary.unlink(missing_ok=True)
 
 
-def convert(source, target, bits=16, cancel=None, options=None):
+def convert(source, target, bits=8, cancel=None, options=None):
     if bits not in (8, 16):
         raise ValueError(message('Поддерживаются 8 и 16 бит'))
     cancel = cancel if cancel is not None else Event()

@@ -14,6 +14,7 @@ def run(arguments):
     parser.add_argument('--language', choices=('ru', 'en'), default='en')
     parser.add_argument('--bits', type=int, choices=(8, 16), default=16)
     parser.add_argument('--half-size', action='store_true')
+    parser.add_argument('--theme', choices=('dark', 'light'), default='dark')
     args = parser.parse_args(arguments)
     if not args.raw_file.is_file() or args.output_directory.exists():
         return 2
@@ -31,9 +32,14 @@ def run(arguments):
     from .ui import Window
     from .converter import discover
     app = QApplication([])
+    app.setStyle('Fusion')
     app.setQuitOnLastWindowClosed(False)
     window = Window()
+    startup = {'startup_bits': window.bits.currentData(),
+               'startup_auto_bright': window.auto_bright.isChecked(),
+               'startup_theme': window.theme.currentData()}
     window.language.setCurrentIndex(window.language.findData(args.language))
+    window.theme.setCurrentIndex(window.theme.findData(args.theme))
     window.show()
     window.imported(discover([args.raw_file]))
     if len(window.sources) != 1:
@@ -85,6 +91,8 @@ def run(arguments):
                 'worker_priorities': result['priorities'], 'worker_threads': result['thread_counts'],
                 'language': window.language.currentData(), 'half_size': args.half_size,
                 'input_width': entry['input_width'], 'input_height': entry['input_height'],
+                'theme': window.theme.currentData(), 'auto_bright': window.auto_bright.isChecked(),
+                **startup,
             })
             window.grab().save(str(args.output_directory/'interface.png'))
             outcome['ok'] = True

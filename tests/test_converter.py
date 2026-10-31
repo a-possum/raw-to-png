@@ -103,7 +103,7 @@ def test_real_raw(tmp_path):
     convert(Path(os.environ['RAW_TO_PNG_SAMPLE']), output)
     width, height, rows, info = png.Reader(filename=str(output)).read()
     assert width > 100 and height > 100
-    assert info['bitdepth'] == 16 and info['planes'] == 3
+    assert info['bitdepth'] == 8 and info['planes'] == 3
     assert sum(1 for _ in rows) == height
 
 
@@ -148,7 +148,7 @@ def test_half_size_fallback_averages_samples(tmp_path, monkeypatch):
             return pixels
     monkeypatch.setattr('raw_to_png.converter.rawpy.imread', lambda path: nullcontext(Raw()))
     output = tmp_path / 'small.png'
-    convert(tmp_path / 'image.ARW', output, options=ConversionOptions(half_size=True))
+    convert(tmp_path / 'image.ARW', output, bits=16, options=ConversionOptions(half_size=True))
     width, height, rows, meta = png.Reader(filename=str(output)).read()
     assert (width, height, meta['bitdepth']) == (2, 2, 16)
     expected = ((pixels[::2, ::2].astype(np.uint32) + pixels[1::2, ::2]

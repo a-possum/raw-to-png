@@ -3,7 +3,7 @@ import sys
 from threading import Event
 import tempfile
 
-from PySide6.QtCore import QSettings, QThread, QUrl, Signal, Qt, QStandardPaths, QSignalBlocker
+from PySide6.QtCore import QSettings, QThread, QTimer, QUrl, Signal, Qt, QStandardPaths, QSignalBlocker
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QFileDialog, QHBoxLayout, QHeaderView,
@@ -17,6 +17,7 @@ from .converter import ConversionOptions, discover, plan
 from .processing import run_queue
 from .diagnostics import DiagnosticReport, build_channel, write_report
 from .i18n import Message, exception_text, language_code, message, render
+from .appearance import palette, stylesheet, theme_code
 
 
 def default_diagnostics_directory():
@@ -101,7 +102,9 @@ class Window(QMainWindow):
         self.sources = []
         self.worker = self.scanner = None
         self.settings = QSettings('RawToPng', 'RawToPng')
+        self.migrate_defaults()
         self.language_code = language_code(self.settings.value('language', 'ru'))
+        self.theme_code = theme_code(self.settings.value('theme', 'dark'))
         self._texts = {}
         self._attributes = []
         self.channel = build_channel()
@@ -121,13 +124,19 @@ class Window(QMainWindow):
         title.setObjectName('title')
         heading.addWidget(title)
         subtitle = QLabel('Добавьте фотографии, выберите папку и запустите конвертацию.')
+        subtitle.setWordWrap(True)
         subtitle.setObjectName('muted')
         heading.addWidget(subtitle)
-        header.addLayout(heading)
-        header.addStretch()
+        header.addLayout(heading, 1)
         badge = QLabel('ARW  →  PNG')
         badge.setObjectName('badge')
-        header.addWidget(badge)
+        header.addWidget(badge, 0, Qt.AlignVCenter)
+        self.theme = QComboBox()
+        self.theme.addItem('Тёмная тема', 'dark')
+        self.theme.addItem('Светлая тема', 'light')
+        self.theme.setCurrentIndex(self.theme.findData(self.theme_code))
+        self.theme.setToolTip('Тема оформления')
+        header.addWidget(self.theme)
         self.language_label = QLabel('Язык')
         header.addWidget(self.language_label)
         self.language = QComboBox()
@@ -204,8 +213,8 @@ class Window(QMainWindow):
         options.setFixedWidth(355)
         options_layout = QVBoxLayout(options)
         self.preset = QComboBox()
+        self.preset.addItem('Для публикации · PNG 8 бит', 'viewing')
         self.preset.addItem('Для обработки · PNG 16 бит', 'editing')
-        self.preset.addItem('Для просмотра · PNG 8 бит', 'viewing')
         self.preset.addItem('Быстро · 8 бит, половина размера', 'quick')
         self.preset.addItem('Свои настройки', 'custom')
         options_layout.addWidget(self.preset)
@@ -213,6 +222,9 @@ class Window(QMainWindow):
         self.preset_help.setWordWrap(True)
         self.preset_help.setObjectName('muted')
         options_layout.addWidget(self.preset_help)
+        self.auto_bright = QCheckBox('Автоматически осветлять')
+        self.auto_bright.setToolTip('Меняет яркость фотографии. Включается только по вашему выбору.')
+        options_layout.addWidget(self.auto_bright)
         options_layout.addWidget(QLabel('Производительность'))
         self.performance = QComboBox()
         self.performance.addItem('Авто · баланс скорости и нагрузки', 'auto')
@@ -227,10 +239,10 @@ class Window(QMainWindow):
         self.maximum_warning.setWordWrap(True)
         self.maximum_notice = QWidget()
         self.maximum_notice.setFixedHeight(80)
-        self.maximum_notice.setStyleSheet('background: #fff4da; border-radius: 6px;')
+        self.maximum_notice.setObjectName('maximumNotice')
         notice_layout = QVBoxLayout(self.maximum_notice)
         notice_layout.setContentsMargins(10, 10, 10, 10)
-        self.maximum_warning.setStyleSheet('color: #78531b;')
+        self.maximum_warning.setObjectName('maximumWarning')
         notice_layout.addWidget(self.maximum_warning)
         options_layout.addWidget(self.maximum_notice)
         self.activity_label = QLabel()
@@ -245,8 +257,8 @@ class Window(QMainWindow):
         form = QFormLayout(self.advanced)
         form.setContentsMargins(0, 4, 0, 4)
         self.bits = QComboBox()
-        self.bits.addItem('16 бит на канал', 16)
         self.bits.addItem('8 бит на канал', 8)
+        self.bits.addItem('16 бит на канал', 16)
         form.addRow('Глубина цвета', self.bits)
         self.white_balance = QComboBox()
         self.white_balance.addItem('Как в камере', 'camera')
@@ -259,9 +271,7 @@ class Window(QMainWindow):
         self.brightness.setSuffix(' EV')
         self.brightness.setToolTip('Множитель яркости 2^EV; 0 — без коррекции')
         form.addRow('Яркость', self.brightness)
-        self.auto_bright = QCheckBox('Автоматически осветлять')
         self.half_size = QCheckBox('½ ширины и высоты')
-        form.addRow(self.auto_bright)
         form.addRow(self.half_size)
         self.diagnostics = QCheckBox('Записывать отчёт проверки')
         self.diagnostics.setChecked(self.channel == 'test')
@@ -278,6 +288,7 @@ class Window(QMainWindow):
         side.addWidget(note)
         side.addStretch()
         scroll = QScrollArea()
+        self.side_scroll = scroll
         scroll.setWidget(side_panel)
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
@@ -329,39 +340,44 @@ class Window(QMainWindow):
         for control in (self.bits, self.white_balance):
             control.currentIndexChanged.connect(self.custom_settings)
         self.brightness.valueChanged.connect(self.custom_settings)
-        self.auto_bright.toggled.connect(self.custom_settings)
         self.half_size.toggled.connect(self.custom_settings)
         self.apply_preset()
         self.restore_options()
         self.refresh_actions()
-        self.setStyleSheet('''
-            QWidget { font-family: "Segoe UI", sans-serif; font-size: 13px; color: #24324a; }
-            QWidget#root { background: #f2f5fa; }
-            QLabel#title { font-size: 27px; font-weight: 700; color: #15223b; }
-            QLabel#muted { color: #65738b; }
-            QLabel#badge { background: #e2eafa; color: #315dba; border-radius: 12px; padding: 10px; font-weight: 600; }
-            QGroupBox { background: white; border: 1px solid #dce3ef; border-radius: 12px; margin-top: 12px; padding: 18px 12px 12px; font-weight: 600; }
-            QGroupBox::title { subcontrol-origin: margin; left: 16px; padding: 0 6px; }
-            QPushButton { background: #f7f9fc; border: 1px solid #d5deec; border-radius: 7px; padding: 9px 10px; }
-            QPushButton:hover { background: #eaf0fc; border-color: #799be2; }
-            QPushButton#primary { background: #315ed5; color: white; border: none; padding: 12px 22px; font-weight: 600; }
-            QPushButton#primary:hover { background: #244bb1; }
-            QPushButton#primary:disabled { color: #98a4b7; background: #e0e6f0; }
-            QPushButton:disabled { color: #98a4b7; background: #edf0f5; border-color: #e0e5ed; }
-            QLineEdit, QComboBox, QDoubleSpinBox { background: white; color: #24324a; border: 1px solid #d5deec; border-radius: 6px; padding: 7px; }
-            QComboBox QAbstractItemView { background: white; color: #24324a; selection-background-color: #dce7ff; selection-color: #183a80; }
-            QTableWidget { background: white; alternate-background-color: #f6f8fc; border: 1px solid #e0e6ef; gridline-color: #edf0f5; selection-background-color: #dce7ff; selection-color: #183a80; }
-            QHeaderView::section { background: #f6f8fc; color: #65738b; border: none; padding: 10px; }
-            QLabel#dropzone { background: #f7f9fd; color: #65738b; border: 2px dashed #cbd7eb; border-radius: 12px; font-size: 16px; }
-            QProgressBar { background: #e5eaf3; border: none; border-radius: 6px; min-height: 20px; text-align: center; }
-            QProgressBar::chunk { background: #8aacef; border-radius: 6px; }
-            QCheckBox { spacing: 7px; }
-        ''')
+        self.apply_theme()
         self.fit_options_height()
 
         self.remember_strings()
         self.retranslate()
         self.language.currentIndexChanged.connect(self.change_language)
+        self.theme.currentIndexChanged.connect(self.change_theme)
+
+    def migrate_defaults(self):
+        if self.settings.value('conversion_defaults_version', 0, type=int) >= 1:
+            return
+        preset = self.settings.value('preset', 'viewing')
+        if preset != 'custom':
+            # Earlier viewing/quick presets enabled brightness implicitly.
+            # Retain explicit custom choices, but remove the old forced value.
+            self.settings.setValue('auto_bright', False)
+            if preset != 'quick':
+                self.settings.setValue('preset', 'viewing')
+                self.settings.setValue('bits', 8)
+        self.settings.setValue('conversion_defaults_version', 1)
+
+    def apply_theme(self):
+        colours = palette(self.theme_code)
+        # Drop the previous stylesheet's cached palette before applying the new
+        # one, otherwise switching light → dark can retain light dialog colours.
+        self.setStyleSheet('')
+        QApplication.instance().setPalette(colours)
+        self.setPalette(colours)
+        self.setStyleSheet(stylesheet(self.theme_code))
+
+    def change_theme(self):
+        self.theme_code = theme_code(self.theme.currentData())
+        self.settings.setValue('theme', self.theme_code)
+        self.apply_theme()
 
     def set_text(self, widget, value):
         value = value if isinstance(value, Message) else message(value)
@@ -385,19 +401,20 @@ class Window(QMainWindow):
             self._attributes.append((group.setTitle, message(group.title())))
         self._attributes.append((self.destination.setPlaceholderText,
                                  message(self.destination.placeholderText())))
-        for combo in (self.preset, self.performance, self.bits, self.white_balance, self.collision):
+        for combo in (self.preset, self.performance, self.bits, self.white_balance, self.collision, self.theme):
             for index in range(combo.count()):
                 combo.setItemData(index, message(combo.itemText(index)), Qt.UserRole + 1)
 
     def retranslate(self):
         self.language.setAccessibleName(self.text('Язык'))
+        self.theme.setAccessibleName(self.text('Тема оформления'))
         self.setWindowTitle(self.text('ARW → PNG · Конвертер фотографий') +
                             (self.text(' · тестовая сборка') if self.channel == 'test' else ''))
         for widget, value in self._texts.items():
             widget.setText(render(value, self.language_code))
         for setter, value in self._attributes:
             setter(render(value, self.language_code))
-        for combo in (self.preset, self.performance, self.bits, self.white_balance, self.collision):
+        for combo in (self.preset, self.performance, self.bits, self.white_balance, self.collision, self.theme):
             with QSignalBlocker(combo):
                 for index in range(combo.count()):
                     # QVariant converts str subclasses to plain strings here.
@@ -413,6 +430,7 @@ class Window(QMainWindow):
                 item.setToolTip(value)
         self.progress.setFormat(render(self._progress_format, self.language_code))
         self.fit_options_height()
+        self.ensure_warning_visible()
 
     def text(self, source, **values):
         return render(message(source, **values), self.language_code)
@@ -441,6 +459,11 @@ class Window(QMainWindow):
         self.maximum_notice.setVisible(self.performance.currentData() == 'maximum')
         label = {'auto': 'Авто', 'eco': 'Экономный', 'maximum': 'Максимальная скорость'}
         self.set_activity(message('{mode} · ожидание запуска', mode=message(label[self.performance.currentData()])))
+        self.ensure_warning_visible()
+
+    def ensure_warning_visible(self):
+        if self.performance.currentData() == 'maximum' and hasattr(self, 'side_scroll'):
+            QTimer.singleShot(0, self, lambda: self.side_scroll.ensureWidgetVisible(self.maximum_notice, 0, 8))
 
     def refresh_actions(self):
         busy = self.busy()
@@ -457,7 +480,7 @@ class Window(QMainWindow):
         mode = self.preset.currentData()
         help_text = {
             'editing': 'Полный размер и 16 бит на канал — больше данных для дальнейшей обработки.',
-            'viewing': 'Полный размер, 8 бит и автоматическое осветление — для обычного просмотра.',
+            'viewing': 'Полный размер и 8 бит на канал — для публикации и обычного просмотра.',
             'quick': 'Половина ширины и высоты, 8 бит — быстрее и меньше места на диске.',
             'custom': 'Выбраны ваши настройки. Результат сохраняется в PNG / sRGB.',
         }
@@ -467,10 +490,9 @@ class Window(QMainWindow):
             self.advanced_toggle.setChecked(True)
             return
         self.applying_preset = True
-        self.bits.setCurrentIndex(0 if mode == 'editing' else 1)
+        self.bits.setCurrentIndex(self.bits.findData(16 if mode == 'editing' else 8))
         self.white_balance.setCurrentIndex(0)
         self.brightness.setValue(0)
-        self.auto_bright.setChecked(mode != 'editing')
         self.half_size.setChecked(mode == 'quick')
         self.applying_preset = False
 
@@ -479,14 +501,14 @@ class Window(QMainWindow):
             self.preset.setCurrentIndex(self.preset.findData('custom'))
 
     def restore_options(self):
-        mode = self.settings.value('preset', 'editing')
+        self.auto_bright.setChecked(self.settings.value('auto_bright', False, type=bool))
+        mode = self.settings.value('preset', 'viewing')
         self.preset.setCurrentIndex(max(0, self.preset.findData(mode)))
         if mode == 'custom':
             self.applying_preset = True
-            self.bits.setCurrentIndex(1 if self.settings.value('bits', 16, type=int) == 8 else 0)
+            self.bits.setCurrentIndex(max(0, self.bits.findData(self.settings.value('bits', 8, type=int))))
             self.white_balance.setCurrentIndex(max(0, self.white_balance.findData(self.settings.value('white_balance', 'camera'))))
             self.brightness.setValue(self.settings.value('brightness', 0.0, type=float))
-            self.auto_bright.setChecked(self.settings.value('auto_bright', False, type=bool))
             self.half_size.setChecked(self.settings.value('half_size', False, type=bool))
             self.applying_preset = False
 
@@ -503,7 +525,7 @@ class Window(QMainWindow):
     def lock(self, busy):
         for control in (self.add_files, self.add_folder, self.clear, self.recursive,
                         self.destination, self.browse, self.bits, self.start, self.remove,
-                        self.preserve, self.collision, self.preset, self.advanced, self.performance, self.language):
+                        self.preserve, self.collision, self.preset, self.advanced, self.performance, self.language, self.theme, self.auto_bright):
             control.setEnabled(not busy)
         if not busy:
             self.refresh_actions()
