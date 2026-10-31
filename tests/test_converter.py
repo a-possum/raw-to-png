@@ -154,3 +154,19 @@ def test_half_size_fallback_averages_samples(tmp_path, monkeypatch):
     expected = ((pixels[::2, ::2].astype(np.uint32) + pixels[1::2, ::2]
                  + pixels[::2, 1::2] + pixels[1::2, 1::2] + 2) // 4)
     np.testing.assert_array_equal(np.array(list(rows)).reshape(2, 2, 3), expected)
+
+
+@pytest.mark.parametrize('bits', [8, 16])
+def test_conversion_returns_actual_rotated_half_size_png_dimensions(tmp_path, monkeypatch, bits):
+    from raw_to_png.converter import ConversionOptions
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+    class Raw:
+        sizes = SimpleNamespace(width=6, height=4)
+        def postprocess(self, **kwargs):
+            return np.ones((3, 2, 3), dtype=np.uint8 if bits == 8 else np.uint16)
+    monkeypatch.setattr('raw_to_png.converter.rawpy.imread', lambda path: nullcontext(Raw()))
+    output = tmp_path/'rotated-small.png'
+    actual = convert(tmp_path/'photo.ARW', output, bits=bits, options=ConversionOptions(half_size=True))
+    width, height, _, _ = png.Reader(filename=str(output)).read()
+    assert actual == (width, height) == (2, 3)

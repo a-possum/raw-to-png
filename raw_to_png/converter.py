@@ -166,3 +166,4 @@ def convert(source, target, bits=16, cancel=None, options=None):
             summed += rgb[1:height:2, 1:width:2]
             rgb = ((summed + 2) // 4).astype(rgb.dtype)
     write_png(rgb, target, cancel)
+    return rgb.shape[1], rgb.shape[0]

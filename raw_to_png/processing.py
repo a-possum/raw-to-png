@@ -1,10 +1,11 @@
 """Bounded, spawn-based conversion queue. Qt stays in the parent process."""
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 import math
 import multiprocessing as mp
 import os
 import shutil
+import statistics
 import sys
 import tempfile
 import time
@@ -82,31 +83,32 @@ def worker_limit(mode, snapshot, successes, speed_target=1):
 
 @dataclass
 class SpeedTuner:
-    """Compare completed pixel throughput at 1, 2, 4… concurrent tasks."""
+    """Compare service rates under load without charging queue fill time.
+
+    Only jobs spent mostly at the requested concurrency qualify. A median of
+    per-job pixel rates resists outliers; multiplying by concurrency estimates
+    steady throughput independently of how long the previous wave takes to exit.
+    """
     target: int = 1
     ceiling: int = 1
     best_target: int = 1
     best_rate: float = 0
     generation: int = 0
-    started_at: object = None
-    count: int = 0
-    pixels: int = 0
+    rates: list = field(default_factory=list)
+    history: list = field(default_factory=list)
     settled: bool = False
 
-    def started(self, now):
-        if self.started_at is None:
-            self.started_at = now
-        return self.generation
-
-    def completed(self, generation, pixels, now):
-        if self.settled or generation != self.generation or self.started_at is None:
+    def completed(self, generation, pixels, seconds, full_load_seconds):
+        if (self.settled or generation != self.generation or seconds <= 0
+                or pixels <= 0 or full_load_seconds / seconds < .8):
             return
-        self.count += 1
-        self.pixels += pixels
-        if self.count < self.target:
+        self.rates.append(pixels / seconds)
+        if len(self.rates) < min(self.target, 4):
             return
-        rate = self.pixels / max(.001, now - self.started_at)
-        if self.best_rate == 0 or rate >= self.best_rate * 1.05:
+        rate = self.target * statistics.median(self.rates)
+        accepted = self.best_rate == 0 or rate >= self.best_rate * 1.05
+        measured_target = self.target
+        if accepted:
             self.best_rate, self.best_target = rate, self.target
             next_target = min(self.ceiling, self.target * 2)
             self.settled = next_target == self.target
@@ -114,13 +116,17 @@ class SpeedTuner:
         else:
             self.target = self.best_target
             self.settled = True
+        self.history.append({'parallelism': measured_target, 'samples': len(self.rates),
+                             'pixels_per_second': round(rate, 3), 'accepted': accepted,
+                             'next_parallelism': self.target})
         self.generation += 1
-        self.started_at, self.count, self.pixels = None, 0, 0
+        self.rates.clear()
 
     def memory_failure(self):
         self.target = self.best_target = 1
         self.settled = True
         self.generation += 1
+        self.rates.clear()
 
 
 def estimate_memory(pixels, bytes_per_pixel=32):
@@ -194,8 +200,9 @@ def _child(source, target, bits, options, connection, cancel, mode='auto'):
                     break
             if cancel.is_set():
                 raise Cancelled()
-            convert(source.path, target, bits, cancel, options)
-            result = {'state': 'Готово', 'detail': str(target)}
+            width, height = convert(source.path, target, bits, cancel, options)
+            result = {'state': 'Готово', 'detail': str(target),
+                      'output_width': width, 'output_height': height}
     except Exception as error:
         # Import failure is also a job failure and must not strand the queue.
         result = {'state': 'Отменено' if isinstance(error, cancelled_type) else 'Ошибка',
@@ -225,10 +232,13 @@ class Running:
     peak: int = 0
     result: object = None
     speed_generation: int = 0
-    width: int = 0
-    height: int = 0
+    input_width: int = 0
+    input_height: int = 0
     started_at: float = 0
     admitted_at: object = None
+    calibration_target: int = 1
+    full_load_seconds: float = 0
+    accounted_at: float = 0
 
 
 def receive_messages(pipe):
@@ -293,6 +303,13 @@ def run_queue(jobs, bits, options, mode, cancel, on_row, on_progress,
         while active or (cursor < len(jobs) and not cancel.is_set()):
             if cancel.is_set():
                 shared_cancel.set()
+            now = time.monotonic()
+            admitted = sum(job.admitted for job in active)
+            for job in active:
+                if job.admitted:
+                    if admitted >= job.calibration_target:
+                        job.full_load_seconds += now - job.accounted_at
+                    job.accounted_at = now
             for job in list(active):
                 try:
                     job.rss = psutil.Process(job.process.pid).memory_info().rss
@@ -303,7 +320,8 @@ def run_queue(jobs, bits, options, mode, cancel, on_row, on_progress,
                     if kind == 'ready':
                         job.ready = True
                         job.pixels = payload['pixels']
-                        job.width, job.height = payload.get('width', 0), payload.get('height', 0)
+                        job.input_width = payload.get('width', 0)
+                        job.input_height = payload.get('height', 0)
                         job.estimate = estimate_memory(job.pixels, bytes_per_pixel)
                         priorities.add(payload['priority'])
                         thread_counts.update(payload['threads'])
@@ -338,7 +356,9 @@ def run_queue(jobs, bits, options, mode, cancel, on_row, on_progress,
                     if job.pixels:
                         bytes_per_pixel = learn_memory(bytes_per_pixel, job.pixels, job.peak)
                         if mode == 'maximum':
-                            tuner.completed(job.speed_generation, job.pixels, time.monotonic())
+                            tuner.completed(job.speed_generation, job.pixels,
+                                            time.monotonic() - job.admitted_at,
+                                            job.full_load_seconds)
                 elif result['state'] == 'Ошибка':
                     failed += 1
                     if result.get('memory_error'):
@@ -350,7 +370,9 @@ def run_queue(jobs, bits, options, mode, cancel, on_row, on_progress,
                 if diagnostics:
                     now = time.monotonic()
                     diagnostics.job_finished(index=job.index, state=result['state'],
-                                             width=job.width, height=job.height,
+                                             width=result.get('output_width', 0),
+                                             height=result.get('output_height', 0),
+                                             input_width=job.input_width, input_height=job.input_height,
                                              wall_seconds=now - job.started_at,
                                              processing_seconds=now - job.admitted_at if job.admitted_at else 0,
                                              peak_bytes=job.peak, cpu_seconds=cpu_seconds, pid=job.process.pid,
@@ -384,8 +406,10 @@ def run_queue(jobs, bits, options, mode, cancel, on_row, on_progress,
                         job.pipe.send('run')
                         job.decided = job.admitted = True
                         job.admitted_at = time.monotonic()
+                        job.accounted_at = job.admitted_at
                         if mode == 'maximum':
-                            job.speed_generation = tuner.started(time.monotonic())
+                            job.speed_generation = tuner.generation
+                            job.calibration_target = limit
                         on_row(job.index, 'Обработка…', str(job.target))
                     else:
                         waiting = True
@@ -464,4 +488,7 @@ def run_queue(jobs, bits, options, mode, cancel, on_row, on_progress,
             'remaining': len(jobs) - ok - failed - skipped,
             'cancelled': cancel.is_set(), 'elapsed': time.monotonic() - started,
             'peak_worker_bytes': peak_worker, 'max_active': max_active,
-            'priorities': sorted(priorities), 'thread_counts': sorted(thread_counts)}
+            'priorities': sorted(priorities), 'thread_counts': sorted(thread_counts),
+            'calibration': tuner.history if mode == 'maximum' else [],
+            'calibration_complete': tuner.settled if mode == 'maximum' else None,
+            'selected_parallelism': tuner.best_target if mode == 'maximum' else None}

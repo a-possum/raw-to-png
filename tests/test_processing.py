@@ -98,31 +98,63 @@ def test_maximum_can_use_all_cpus_but_only_at_learned_target():
 
 def test_speed_tuner_scales_when_throughput_improves_and_backs_off():
     tuner = SpeedTuner(ceiling=8)
-    phase = tuner.started(0)
-    tuner.completed(phase, 24_000_000, 10)
+    phase = tuner.generation
+    tuner.completed(phase, 24_000_000, 10, 10)
     assert tuner.target == 2
-    phase = tuner.started(10)
-    tuner.completed(phase, 24_000_000, 19)
-    tuner.completed(phase, 24_000_000, 20)
+    phase = tuner.generation
+    tuner.completed(phase, 24_000_000, 9, 9)
+    tuner.completed(phase, 24_000_000, 10, 10)
     assert tuner.target == 4
-    phase = tuner.started(20)
+    phase = tuner.generation
     # Four jobs now take too long: throughput falls below the two-worker level.
-    for end in (30, 40, 50, 60):
-        tuner.completed(phase, 24_000_000, end)
+    for _ in range(4):
+        tuner.completed(phase, 24_000_000, 40, 40)
     assert tuner.target == 2 and tuner.settled
-    tuner.completed(phase, 100_000_000, 61)
+    tuner.completed(phase, 100_000_000, 1, 1)
     assert tuner.target == 2
 
 
 def test_tuner_ignores_previous_phase_and_handles_memory_failure():
     tuner = SpeedTuner(ceiling=4)
-    phase = tuner.started(0)
-    tuner.completed(phase, 24_000_000, 10)
+    phase = tuner.generation
+    tuner.completed(phase, 24_000_000, 10, 10)
     assert tuner.target == 2
-    tuner.completed(phase, 24_000_000, 11)
-    assert tuner.count == 0
+    tuner.completed(phase, 24_000_000, 11, 11)
+    assert tuner.rates == []
     tuner.memory_failure()
     assert tuner.target == 1 and tuner.settled
+
+
+def test_tuner_compares_fully_loaded_rates_without_transition_wave_bias():
+    # An eight-worker wave can take two batches to fill while old jobs exit.
+    # Completed jobs still have a 14-second service time, so choosing four
+    # because the entire transition took 28 seconds would discard real speed.
+    tuner = SpeedTuner(ceiling=12)
+    for target, seconds in [(1, 10), (2, 10), (4, 12), (8, 14), (12, 21)]:
+        assert tuner.target == target
+        phase = tuner.generation
+        for _ in range(min(target, 4)):
+            tuner.completed(phase, 24_000_000, seconds, seconds)
+    assert tuner.target == 8 and tuner.settled
+    assert [row['parallelism'] for row in tuner.history] == [1, 2, 4, 8, 12]
+    assert tuner.history[3]['accepted'] and not tuner.history[4]['accepted']
+
+
+def test_tuner_excludes_unfilled_memory_limited_and_tail_jobs():
+    tuner = SpeedTuner(target=8, ceiling=12, best_target=4, best_rate=8_000_000)
+    for _ in range(20):
+        tuner.completed(tuner.generation, 24_000_000, 12, 5)
+    assert tuner.target == 8 and not tuner.settled and not tuner.history
+    assert not tuner.rates
+
+
+def test_tuner_normalizes_resolution_and_resists_one_slow_file():
+    tuner = SpeedTuner(target=4, ceiling=8, best_target=2, best_rate=4_800_000)
+    for pixels, seconds in [(24_000_000, 12), (48_000_000, 24),
+                            (12_000_000, 6), (24_000_000, 120)]:
+        tuner.completed(tuner.generation, pixels, seconds, seconds)
+    assert tuner.target == 8
+    assert tuner.history[0]['pixels_per_second'] == 8_000_000
 
 
 def test_budget_reserves_system_and_unallocated_running_buffers():
@@ -267,10 +299,13 @@ def test_real_spawned_conversion_and_cancellation(tmp_path):
     from threading import Timer
     import png
     from raw_to_png.converter import ConversionOptions
+    from raw_to_png.diagnostics import DiagnosticReport
     source = Path(os.environ['RAW_TO_PNG_SAMPLE'])
     work = [(Source(source, Path(source.name)), tmp_path/'real.png')]
+    report = DiagnosticReport(tmp_path/'logs', channel='test', mode='auto', bits=8,
+                              options=ConversionOptions(half_size=True), file_count=1)
     result = run_queue(work, 8, ConversionOptions(half_size=True), 'auto', Event(),
-                       lambda *args: None, lambda value: None)
+                       lambda *args: None, lambda value: None, diagnostics=report)
     assert result['ok'] == 1 and result['thread_counts'] == [1]
     import sys
     if sys.platform == 'win32':
@@ -281,6 +316,11 @@ def test_real_spawned_conversion_and_cancellation(tmp_path):
     width, height, rows, info = png.Reader(filename=str(tmp_path/'real.png')).read()
     assert width > 100 and height > 100 and info['bitdepth'] == 8
     assert sum(1 for _ in rows) == height
+    data = report.finish(result)
+    assert data['schema_version'] == 2
+    assert (data['files'][0]['width'], data['files'][0]['height']) == (width, height)
+    assert data['files'][0]['input_width'] * data['files'][0]['input_height'] > width * height
+    assert data['queue']['thread_counts'] == [1]
     cancel = Event()
     timers = []
     def on_row(index, state, detail):

@@ -13,7 +13,7 @@ import uuid
 
 import psutil
 
-VERSION = '0.1.0'
+VERSION = '0.2.0'
 MAX_FILES = 2000
 MAX_SAMPLES = 3600
 MAX_REPORTS = 10
@@ -72,7 +72,7 @@ class DiagnosticReport:
             except importlib.metadata.PackageNotFoundError:
                 pass
         self.data = {
-            'schema_version': 1, 'app_version': VERSION, 'channel': channel,
+            'schema_version': 2, 'app_version': VERSION, 'channel': channel,
             'started_utc': datetime.now(timezone.utc).isoformat(), 'state': 'running',
             'system': {'os': platform.system(), 'os_release': platform.release(),
                        'os_version': platform.version(), 'python_version': platform.python_version(),
@@ -84,6 +84,7 @@ class DiagnosticReport:
                          'file_count': file_count},
             'measurement': {'sample_interval_seconds': 1,
                             'cpu_percent_definition': '100% = all available logical CPUs',
+                            'dimensions_definition': 'width/height = completed PNG; input_width/input_height = RAW metadata before orientation',
                             'ram_definition': 'Sampled sum of parent and child RSS; shared pages may be counted twice'},
         }
         for process in self._processes():
@@ -146,7 +147,7 @@ class DiagnosticReport:
                              'cpu_percent': round(percent, 2), 'rss_bytes': rss, **self.latest})
         self.last_sample, self.last_sample_cpu = now, self.cpu_total
 
-    def job_finished(self, *, index, state, width=0, height=0, wall_seconds=0,
+    def job_finished(self, *, index, state, width=0, height=0, input_width=0, input_height=0, wall_seconds=0,
                      processing_seconds=0, peak_bytes=0, cpu_seconds=None, pid=None,
                      error_kind=None, error_code=None, exit_code=None):
         if cpu_seconds is not None and pid is not None:
@@ -159,6 +160,7 @@ class DiagnosticReport:
         self.counts[key] += 1
         if len(self.files) < MAX_FILES:
             self.files.append({'file_id': index + 1, 'state': key, 'width': width, 'height': height,
+                               'input_width': input_width, 'input_height': input_height,
                                'wall_seconds': round(wall_seconds, 3),
                                'processing_seconds': round(processing_seconds, 3),
                                'peak_worker_bytes': peak_bytes, 'cpu_seconds': cpu_seconds,
@@ -213,6 +215,10 @@ class DiagnosticReport:
             # Explicit allowlist: never serialize error messages, paths or PIDs.
             self.data['queue'] = {key: result[key] for key in (
                 'ok', 'failed', 'skipped', 'remaining', 'cancelled', 'elapsed', 'max_active')}
+            for key in ('priorities', 'thread_counts', 'calibration',
+                        'calibration_complete', 'selected_parallelism'):
+                if key in result:
+                    self.data['queue'][key] = result[key]
         self.data['completed_utc'] = datetime.now(timezone.utc).isoformat()
         self.checkpoint()
         return self.snapshot()
