@@ -18,6 +18,8 @@ from .processing import run_queue
 from .diagnostics import DiagnosticReport, build_channel, write_report
 from .i18n import Message, exception_text, language_code, message, render
 from .appearance import palette, stylesheet, theme_code
+from .estimates import duration_message
+from .icons import application_icon, configure_application
 
 
 def default_diagnostics_directory():
@@ -29,6 +31,7 @@ class Worker(QThread):
     progress = Signal(int)
     summary = Signal(object)
     activity = Signal(object)
+    estimate = Signal(object)
 
     def __init__(self, jobs, bits, options=None, mode='auto', *, diagnostics_enabled=False,
                  diagnostics_dir=None, channel='release'):
@@ -53,7 +56,9 @@ class Worker(QThread):
             except Exception as error:
                 self.report_error = type(error).__name__
         try:
-            kwargs = {'diagnostics': report} if report else {}
+            kwargs = {'on_estimate': self.estimate.emit}
+            if report:
+                kwargs['diagnostics'] = report
             self.result = run_queue(self.jobs, self.bits, self.options, self.mode, self.cancel,
                                     self.row.emit, self.progress.emit, self.activity.emit, **kwargs)
         except Exception as error:
@@ -96,6 +101,7 @@ class Window(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle('ARW → PNG · Конвертер фотографий')
+        self.setWindowIcon(application_icon())
         self.resize(1220, 820)
         self.setMinimumSize(1000, 720)
         self.setAcceptDrops(True)
@@ -109,6 +115,7 @@ class Window(QMainWindow):
         self._attributes = []
         self.channel = build_channel()
         self.last_report = None
+        self.eta_active = False
         if self.channel == 'test':
             self.setWindowTitle(self.windowTitle() + ' · тестовая сборка')
         self.applying_preset = False
@@ -164,6 +171,7 @@ class Window(QMainWindow):
         self.recursive.setChecked(True)
         files_layout.addWidget(self.recursive)
         self.table = QTableWidget(0, 3)
+        self.table.setToolTip('Дважды щёлкните по готовой строке, чтобы открыть PNG.')
         self.table.setHorizontalHeaderLabels(['Фотография', 'Статус', 'Результат / ошибка'])
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
         self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
@@ -302,6 +310,11 @@ class Window(QMainWindow):
         self.progress.setValue(0)
         self.set_progress_format('%v из %m файлов · %p%')
         layout.addWidget(self.progress)
+        self.eta = QLabel('Оцениваем оставшееся время…')
+        self.eta.setObjectName('muted')
+        self.eta.setWordWrap(True)
+        self.eta.setVisible(False)
+        layout.addWidget(self.eta)
         self.diagnostics_status = QLabel('Отчёт проверки будет сохранён только на этом компьютере.')
         self.diagnostics_status.setObjectName('muted')
         self.diagnostics_status.setVisible(self.diagnostics.isChecked())
@@ -328,6 +341,7 @@ class Window(QMainWindow):
         self.browse.clicked.connect(self.pick_destination)
         self.clear.clicked.connect(self.clear_queue)
         self.table.itemSelectionChanged.connect(self.refresh_actions)
+        self.table.cellDoubleClicked.connect(self.open_result)
         self.remove.clicked.connect(self.remove_selected)
         self.start.clicked.connect(self.begin)
         self.stop.clicked.connect(self.cancel)
@@ -620,6 +634,9 @@ class Window(QMainWindow):
         self.progress.setValue(0)
         self.lock(True)
         self.stop.setEnabled(True)
+        self.eta_active = True
+        self.set_text(self.eta, 'Оцениваем оставшееся время…')
+        self.eta.setVisible(True)
         self.set_text(self.status, 'Конвертация…')
         self.last_report = None
         self.save_report.setEnabled(False)
@@ -635,18 +652,46 @@ class Window(QMainWindow):
         self.worker.progress.connect(self.progress.setValue)
         self.worker.summary.connect(lambda value: self.set_text(self.status, value))
         self.worker.activity.connect(self.set_activity)
+        self.worker.estimate.connect(self.update_estimate)
         self.worker.finished.connect(self.finished)
         self.worker.start()
         self.open_output.setEnabled(True)
 
     def update_row(self, index, state, detail):
+        self.table.item(index, 2).output_path = (Path(detail) if state == 'Готово' else None)
         for column, value in ((1, message(state)), (2, detail)):
             item = self.table.item(index, column)
             item.source_text = value
             item.setText(render(value, self.language_code))
             item.setToolTip(item.text())
 
+    def update_estimate(self, estimate):
+        if not self.eta_active:
+            return
+        if estimate['waiting']:
+            self.set_text(self.eta, 'Ожидание свободной памяти · оценка времени приостановлена')
+        elif estimate['seconds'] is None:
+            self.set_text(self.eta, 'Уточняем оставшееся время…')
+        else:
+            self.set_text(self.eta, message('Осталось примерно {time}',
+                                            time=duration_message(estimate['seconds'])))
+
+    def open_result(self, row, column=0):
+        state = self.table.item(row, 1)
+        item = self.table.item(row, 2)
+        path = getattr(item, 'output_path', None)
+        if state is None or state.source_text != 'Готово' or path is None or path.suffix.lower() != '.png':
+            return
+        if not path.is_file():
+            QMessageBox.information(self, self.text('Файл недоступен'),
+                                    self.text('PNG был перемещён или удалён.'))
+        elif not QDesktopServices.openUrl(QUrl.fromLocalFile(str(path.resolve()))):
+            QMessageBox.information(self, self.text('Не удалось открыть PNG'),
+                                    self.text('Откройте файл из папки результата.'))
+
     def finished(self):
+        self.eta_active = False
+        self.eta.setVisible(False)
         self.lock(False)
         self.stop.setEnabled(False)
         if self.worker:
@@ -664,6 +709,8 @@ class Window(QMainWindow):
                 self.update_row(row, 'Не обработано', self.table.item(row, 2).source_text)
 
     def cancel(self):
+        self.eta_active = False
+        self.eta.setVisible(False)
         if self.worker:
             self.worker.cancel.set()
             self.stop.setEnabled(False)
@@ -708,6 +755,7 @@ def main():
         from .packaging_check import run
         sys.exit(run(sys.argv[2:]))
     app = QApplication(sys.argv)
+    configure_application(app)
     app.setStyle('Fusion')
     window = Window()
     window.show()

@@ -64,6 +64,18 @@ def test_closed_windows_pipe_is_a_normal_end_of_messages():
     assert list(receive_messages(Closed())) == []
 
 
+def test_queue_reports_estimates_after_successes_and_keeps_skips_out_of_work(tmp_path):
+    estimates = []
+    work = jobs(tmp_path, ['good.ARW']*8)
+    work.append((Source(Path('already.ARW'), Path('already.ARW')), None))
+    result = run_queue(work, 8, None, 'eco', Event(), lambda *args: None, lambda *args: None,
+                       snapshot=lambda: Resources(16*GIB, 12*GIB, 8),
+                       _target=simulated_child, on_estimate=estimates.append)
+    assert result['ok'] == 8 and result['skipped'] == 1
+    assert estimates[0] == {'seconds': None, 'waiting': False}
+    assert any(row['seconds'] is not None and row['seconds'] > 0 for row in estimates)
+
+
 def test_container_memory_does_not_count_reclaimable_file_cache_as_busy(monkeypatch):
     import raw_to_png.processing as module
     from types import SimpleNamespace

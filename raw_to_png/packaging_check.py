@@ -31,7 +31,9 @@ def run(arguments):
     import numpy as np
     from .ui import Window
     from .converter import discover
+    from .icons import configure_application
     app = QApplication([])
+    configure_application(app)
     app.setStyle('Fusion')
     app.setQuitOnLastWindowClosed(False)
     window = Window()
@@ -83,6 +85,18 @@ def run(arguments):
                 raise RuntimeError('incorrect reported PNG dimensions')
             if result['thread_counts'] != [1]:
                 raise RuntimeError('thread limit not applied')
+            if window.windowIcon().isNull():
+                raise RuntimeError('missing application icon')
+            opened = []
+            from PySide6.QtGui import QDesktopServices
+            real_open = QDesktopServices.openUrl
+            QDesktopServices.openUrl = lambda url: opened.append(url) or True
+            try:
+                window.open_result(0)
+            finally:
+                QDesktopServices.openUrl = real_open
+            if len(opened) != 1 or Path(opened[0].toLocalFile()) != outputs[0]:
+                raise RuntimeError('incorrect result-opening target')
             write_report(args.output_directory/'diagnostics.json', window.last_report)
             write_report(args.output_directory/'packaging-check.json', {
                 'ok': True, 'channel': build_channel(), 'width': width, 'height': height,
@@ -93,6 +107,7 @@ def run(arguments):
                 'input_width': entry['input_width'], 'input_height': entry['input_height'],
                 'theme': window.theme.currentData(), 'auto_bright': window.auto_bright.isChecked(),
                 **startup,
+                'icon_loaded': True, 'result_opening_checked': True,
             })
             window.grab().save(str(args.output_directory/'interface.png'))
             outcome['ok'] = True

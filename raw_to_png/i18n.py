@@ -1,6 +1,20 @@
 """Explicit UI messages; file paths and library errors are never translated."""
 
 ENGLISH = {
+    'Оцениваем оставшееся время…': 'Estimating remaining time…',
+    'Уточняем оставшееся время…': 'Updating the time estimate…',
+    'Ожидание свободной памяти · оценка времени приостановлена': 'Waiting for free memory · time estimate paused',
+    'Осталось примерно {time}': 'About {time} remaining',
+    'менее 10 с': 'less than 10 s',
+    '{seconds} с': '{seconds} s',
+    '{minutes} мин {seconds} с': '{minutes} min {seconds} s',
+    '{minutes} мин': '{minutes} min',
+    '{hours} ч {minutes} мин': '{hours} h {minutes} min',
+    'Дважды щёлкните по готовой строке, чтобы открыть PNG.': 'Double-click a completed row to open its PNG.',
+    'Файл недоступен': 'File unavailable',
+    'PNG был перемещён или удалён.': 'The PNG was moved or deleted.',
+    'Не удалось открыть PNG': 'Could not open the PNG',
+    'Откройте файл из папки результата.': 'Open the file from the output folder.',
     'ARW → PNG · Конвертер фотографий': 'ARW → PNG · Photo converter',
     ' · тестовая сборка': ' · test build',
     'Язык': 'Language',

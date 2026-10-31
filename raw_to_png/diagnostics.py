@@ -13,7 +13,7 @@ import uuid
 
 import psutil
 
-VERSION = '0.3.0'
+VERSION = '0.4.0'
 MAX_FILES = 2000
 MAX_SAMPLES = 3600
 MAX_REPORTS = 10

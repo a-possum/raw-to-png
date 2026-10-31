@@ -13,6 +13,7 @@ import time
 import psutil
 
 from .i18n import exception_text, message
+from .estimates import RemainingTime
 
 MIB = 1024 ** 2
 GIB = 1024 ** 3
@@ -277,7 +278,8 @@ def publish(staged, target):
 
 
 def run_queue(jobs, bits, options, mode, cancel, on_row, on_progress,
-              on_activity=lambda text: None, *, snapshot=resources, _target=None, diagnostics=None):
+              on_activity=lambda text: None, *, snapshot=resources, _target=None, diagnostics=None,
+              on_estimate=None):
     """Launch one metadata probe at a time; admit decoding against live RAM."""
     if mode not in MODES:
         raise ValueError(message('Неизвестный режим производительности'))
@@ -292,6 +294,8 @@ def run_queue(jobs, bits, options, mode, cancel, on_row, on_progress,
     label = {'auto': 'Авто', 'eco': 'Экономный', 'maximum': 'Максимальная скорость'}[mode]
     tuner = SpeedTuner()
     started = time.monotonic()
+    estimator = RemainingTime()
+    last_estimate = started - 1
 
     def activity(text):
         nonlocal last_activity
@@ -353,6 +357,9 @@ def run_queue(jobs, bits, options, mode, cancel, on_row, on_progress,
                 if result['state'] == 'Готово':
                     ok += 1
                     successes += 1
+                    if job.admitted_at is not None:
+                        estimator.completed(time.monotonic() - job.started_at, job.pixels,
+                                            job.admitted_at - job.started_at)
                     if job.pixels:
                         bytes_per_pixel = learn_memory(bytes_per_pixel, job.pixels, job.peak)
                         if mode == 'maximum':
@@ -472,6 +479,13 @@ def run_queue(jobs, bits, options, mode, cancel, on_row, on_progress,
             max_active = max(max_active, count)
             if diagnostics:
                 diagnostics.observe(count, limit, state, waiting)
+            now = time.monotonic()
+            if on_estimate and now - last_estimate >= 1:
+                remaining = estimator.estimate(sum(target is not None for _, target in jobs[cursor:]),
+                                               [(now - job.started_at, job.pixels) for job in active],
+                                               limit, waiting)
+                on_estimate({'seconds': remaining, 'waiting': waiting})
+                last_estimate = now
             activity(message('{mode} · обрабатывается фотографий: {count}' if not waiting else
                              '{mode} · ожидание свободной памяти, активных задач: {count}',
                              mode=message(label), count=count))
