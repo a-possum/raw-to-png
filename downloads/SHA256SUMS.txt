@@ -1,0 +1,2 @@
+5b5820933ca8fbadfe9d6b15c313cf665f61e171da8f6166baa45aad892ccb75  ARW-to-PNG-Windows-x64-test-0.3.0.zip
+058f55d61508e9a40d90c9443ad811af4f791cfb2f11f4af15f91859f863c2d4  ARW-to-PNG-source-0.3.0.zip
